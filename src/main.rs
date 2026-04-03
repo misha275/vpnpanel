@@ -8,14 +8,18 @@ mod console;
 
 #[tokio::main]
 async fn main() -> Result<()>  {
-    let db_path = String::from("users.db");
+    let db = String::from("users.db");
 
-    let mut conn = Connection::open(&db_path)?;
+    let mut conn = Connection::open(&db)?;
     core::create_tables(&mut conn)?;
-    core::sync_next_payment_dates(&conn)?;
-    core::spawn_midnight_days_left_worker(db_path);
+    core::spawn_minute_sync_worker(db.clone());
+    // core::sync_next_payment_dates(&conn)?;
+    // core::spawn_midnight_days_left_worker(db);
 
     loop {
+        core::sync_db(&db).await.unwrap_or_else(|e| {
+            println!("{}", console::color_fmt_err("Error syncing with API: {}", &[&e]));
+        });
         // println!("input command");
         // print!("\x1b[34m>> \x1b[0m ");
         print!("\x1b[34m>> \x1b[0m ");
@@ -29,8 +33,16 @@ async fn main() -> Result<()>  {
             },
             ["adddays", name, days] => {
                 let days = days.parse::<i32>().unwrap_or(0);
-                core::add_days(&mut conn, name, days)?;
+                core::add_days(&mut conn, name, days).await?;
             },
+            ["changestatus", name, status] => {
+                let status = status.parse::<bool>().unwrap_or(false);
+                core::change_status(&mut conn, name, status).await?;
+            },
+            ["help"] => {
+                core::help();
+            },
+            ["sync"] => {},
             [""] => continue,
             ["quit"] | ["exit"] => break,
             _ => {
