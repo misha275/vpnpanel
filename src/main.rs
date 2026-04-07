@@ -13,16 +13,12 @@ async fn main() -> Result<()>  {
     let mut conn = Connection::open(&db)?;
     core::create_tables(&mut conn)?;
     core::spawn_minute_sync_worker(db.clone());
-    // core::sync_next_payment_dates(&conn)?;
-    // core::spawn_midnight_days_left_worker(db);
+    print!("\x1b[34m>> \x1b[0m ");
 
     loop {
         core::sync_db(&db).await.unwrap_or_else(|e| {
             println!("{}", console::color_fmt_err("Error syncing with API: {}", &[&e]));
         });
-        // println!("input command");
-        // print!("\x1b[34m>> \x1b[0m ");
-        print!("\x1b[34m>> \x1b[0m ");
         io::stdout().flush().unwrap();
         let mut input = String::new();
         std::io::stdin().read_line(&mut input).expect("Failed to read line");

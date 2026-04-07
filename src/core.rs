@@ -23,9 +23,12 @@ pub fn create_tables(conn: &mut Connection) -> Result<()> {
             uuid TEXT PRIMARY KEY,
             name TEXT UNIQUE NOT NULL,
             days_left INTEGER NOT NULL DEFAULT 0,
+            up FLOAT NOT NULL DEFAULT 0,
+            down FLOAT NOT NULL DEFAULT 0,
             total_GB FLOAT NOT NULL DEFAULT 0,
             next_payment_date DATE,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_online DATETIME NOT NULL DEFAULT 0,
             is_active BOOLEAN NOT NULL DEFAULT TRUE
         )",
         [],
@@ -129,12 +132,12 @@ pub async fn add_to_panel(uuid: &str, email: &str, days: i64, inb: &[i8]) -> Res
 
 
 pub async fn add_days(conn: &mut Connection, name: &str, days: i32) -> Result<()> {
-    let tx = conn.transaction()?;
-    tx.execute(
-        "UPDATE user_auth SET days_left = days_left + ?1 WHERE name = ?2",
-        params![days, name],
-    )?;
-    tx.commit()?;
+    // let tx = conn.transaction()?;
+    // tx.execute(
+    //     "UPDATE user_auth SET days_left = days_left + ?1 WHERE name = ?2",
+    //     params![days, name],
+    // )?;
+    // tx.commit()?;
 
     let uuid: String = conn.query_row(
         "SELECT uuid FROM user_auth WHERE name = ?1",
@@ -147,18 +150,42 @@ pub async fn add_days(conn: &mut Connection, name: &str, days: i32) -> Result<()
         params![name],
         |row| row.get(0),
     )?;
+    let newdays: i64 = dbdays + days as i64;
+    let up: i64 = conn.query_row(
+        "SELECT up FROM user_auth WHERE name = ?1",
+        params![name],
+        |row| row.get(0),
+    )?;
+    let down: i64 = conn.query_row(
+        "SELECT down FROM user_auth WHERE name = ?1",
+        params![name],
+        |row| row.get(0),
+    )?;
+    let enable: bool = conn.query_row(
+        "SELECT is_active FROM user_auth WHERE name = ?1",
+        params![name],
+        |row| row.get(0),
+    )?;
+    let lastonline: i64 = conn.query_row(
+        "SELECT last_online FROM user_auth WHERE name = ?1",
+        params![name],
+        |row| row.get(0),
+    )?;
     println!("{}", color_fmt_ok("Successfully added days: {} to user: {}", &[days.to_string().as_str(), name]));
-    let _ = extend_user(&uuid, name, dbdays, INBLIST).await;
+    let _ = extend_user(&uuid, name, newdays, INBLIST, enable, up, down, lastonline).await;
     Ok(())
 
 }
-
 
 pub async fn extend_user(
     uuid: &str,
     email: &str,
     dbdays: i64,
     inb: &[i8],
+    enable: bool,
+    up: i64,
+    down: i64,
+    lastonline: i64,
 ) -> Result<(), String> {
 
     let client = Client::builder()
@@ -189,19 +216,15 @@ pub async fn extend_user(
 
         let settings = format!(
             "{{\"clients\":[{{\
-                \"id\":\"{}\",\
-                \"flow\":\"\",\
+                \"enable\":\"{}\",\
                 \"email\":\"{}-{}\",\
-                \"limitIp\":0,\
-                \"totalGB\":0,\
-                \"expiryTime\":{},\
-                \"enable\":true,\
-                \"tgId\":\"\",\
-                \"subId\":\"\",\
-                \"comment\":\"\",\
-                \"reset\":0\
+                \"uuid\":\"{}\",\
+                \"up\":\"{}\",\
+                \"down\":\"{}\",\
+                \"expiryTime\":\"{}\",\
+                \"lastOnline\":\"{}\",\
             }}]}}",
-            uuid, email, inbnum, expiry
+            enable, email, inbnum, uuid, up, down, expiry, lastonline
         );
 
         println!("{}", color_fmt_log("Updating client", &[]));
@@ -241,67 +264,88 @@ pub async fn change_status(conn: &mut Connection, name: &str, status: bool) -> R
         params![name],
         |row| row.get(0),
     )?;
+    let dbdays: i64 = conn.query_row(
+        "SELECT days_left FROM user_auth WHERE name = ?1",
+        params![name],
+        |row| row.get(0),
+    )?;
+    let up: i64 = conn.query_row(
+        "SELECT up FROM user_auth WHERE name = ?1",
+        params![name],
+        |row| row.get(0),
+    )?;
+    let down: i64 = conn.query_row(
+        "SELECT down FROM user_auth WHERE name = ?1",
+        params![name],
+        |row| row.get(0),
+    )?;
+    let lastonline: i64 = conn.query_row(
+        "SELECT last_online FROM user_auth WHERE name = ?1",
+        params![name],
+        |row| row.get(0),
+    )?;
     println!("{}", color_fmt_ok("Successfully changed status for user: {}, status: {}", &[name, status.to_string().as_str()]));
-    let _ = change_status_api(&uuid, name, status, INBLIST).await;
+    // let _ = change_status_api(&uuid, name, status, INBLIST).await;
+    let _ = extend_user(&uuid, name, dbdays, INBLIST, status, up, down, lastonline).await;
     Ok(())
 
 }
 
-
-pub async fn change_status_api(
-    uuid: &str,
-    email: &str,
-    status: bool,
-    inb: &[i8],
-) -> Result<(), String> {
-
-    let client = Client::builder()
-        .cookie_store(true)
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let login_res = client
-        .post(format!("{}/login", ADDR))
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body("username=admin&password=admin")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if !login_res.status().is_success() {
-        return Err("login failed".into());
-    }
-
-    for inbnum in inb {
-
-        let settings = format!(
-            "{{\"clients\":[{{\"id\":\"{}\",\"email\":\"{}-{}\",\"enable\":{}}}]}}",
-            uuid, email, inbnum, status
-        );
-
-        let res = client
-            .post(format!(
-                "{}/panel/api/inbounds/updateClient/{}",
-                ADDR, uuid
-            ))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .body(format!("id={}&settings={}", inbnum, settings))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let text = res.text().await.unwrap_or_default();
-        println!("RESPONSE: {}", text);
-    }
-
-    Ok(())
-}
+// pub async fn change_status_api(
+//     uuid: &str,
+//     email: &str,
+//     status: bool,
+//     inb: &[i8],
+// ) -> Result<(), String> {
+// 
+//     let client = Client::builder()
+//         .cookie_store(true)
+//         .build()
+//         .map_err(|e| e.to_string())?;
+// 
+//     let login_res = client
+//         .post(format!("{}/login", ADDR))
+//         .header("Content-Type", "application/x-www-form-urlencoded")
+//         .body("username=admin&password=admin")
+//         .send()
+//         .await
+//         .map_err(|e| e.to_string())?;
+// 
+//     if !login_res.status().is_success() {
+//         return Err("login failed".into());
+//     }
+// 
+//     for inbnum in inb {
+// 
+//         let settings = format!(
+//             "{{\"clients\":[{{\"id\":\"{}\",\"email\":\"{}-{}\",\"enable\":{}}}]}}",
+//             uuid, email, inbnum, status
+//         );
+// 
+//         let res = client
+//             .post(format!(
+//                 "{}/panel/api/inbounds/updateClient/{}",
+//                 ADDR, uuid
+//             ))
+//             .header("Content-Type", "application/x-www-form-urlencoded")
+//             .body(format!("id={}&settings={}", inbnum, settings))
+//             .send()
+//             .await
+//             .map_err(|e| e.to_string())?;
+// 
+//         let text = res.text().await.unwrap_or_default();
+//         println!("RESPONSE: {}", text);
+//     }
+// 
+//     Ok(())
+// }
 
 
 pub fn help() {
     println!("{}", color_fmt_log("Available commands:", &[]));
-    println!("{}", color_fmt_log("adduser <name> - Add a new user", &[]));
-    println!("{}", color_fmt_log("adddays <uuid> <name> <days> - Add days to a user", &[]));
+    println!("{}", color_fmt_log("adduser {} - Add a new user", &["<name>"]));
+    println!("{}", color_fmt_log("adddays {} {} - Add days to a user", &["<name>", "<days>"]));
+    println!("{}", color_fmt_log("changestatus {} {} - Change user status", &["<name>", "<true/false>"]));
     println!("{}", color_fmt_log("sync - Sync with API", &[]));
     println!("{}", color_fmt_log("help - Show this message", &[]));
     println!("{}", color_fmt_log("quit/exit - Exit the program", &[]));
@@ -359,7 +403,8 @@ pub async fn sync_db(db_path: &str) -> Result<(), String> {
             let up = c["up"].as_i64().unwrap_or(0);
             let down = c["down"].as_i64().unwrap_or(0);
             let total_gb = (up + down) as f64 / 1024f64 / 1024f64 / 1024f64;
-
+            // let all_time = c["allTime"].as_i64().unwrap_or(0);
+            let last_online = c["lastOnline"].as_i64().unwrap_or(0);
             let expiry = c["expiryTime"].as_i64().unwrap_or(0);
 
             let (days_left, next_date) = if expiry > 0 {
@@ -373,21 +418,27 @@ pub async fn sync_db(db_path: &str) -> Result<(), String> {
             };
 
             conn.execute(
-                "INSERT INTO user_auth (uuid, name, days_left, total_GB, next_payment_date, is_active)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "INSERT INTO user_auth (uuid, name, days_left, up, down, total_GB, next_payment_date, is_active, last_online)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(uuid) DO UPDATE SET
                     name=excluded.name,
                     days_left=excluded.days_left,
+                    up=excluded.up,
+                    down=excluded.down,
                     total_GB=excluded.total_GB,
                     next_payment_date=excluded.next_payment_date,
-                    is_active=excluded.is_active",
+                    is_active=excluded.is_active,
+                    last_online=excluded.last_online",
                 params![
                     uuid,
                     email,
                     days_left,
+                    up,
+                    down,
                     total_gb,
                     next_date,
-                    enable
+                    enable,
+                    last_online
                 ]
             ).map_err(|e| e.to_string())?;
         }
